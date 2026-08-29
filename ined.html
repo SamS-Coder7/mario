@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Super Mario JS Platformer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body { background: #111; color: #fff; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+    #game-container { position: relative; width: 800px; height: 450px; border: 4px solid #fff; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
+    canvas { display: block; background: #5c94fc; width: 100%; height: 100%; }
+    .hud { position: absolute; top: 15px; left: 20px; right: 20px; display: flex; justify-content: space-between; font-size: 18px; font-weight: 800; font-family: monospace; text-shadow: 2px 2px 0 #000; z-index: 10; }
+    .hud-title { color: #e52521; }
+    .hud-val { color: #fbd000; }
+    .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.75); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; z-index: 20; }
+    .overlay h1 { font-size: 38px; color: #fbd000; text-transform: uppercase; text-shadow: 3px 3px 0 #e52521; }
+    .overlay p { color: #fff; font-size: 16px; margin-bottom: 10px; }
+    .btn { background: #43b047; color: #fff; border: 2px solid #fff; padding: 12px 24px; font-size: 18px; font-weight: bold; border-radius: 6px; cursor: pointer; text-transform: uppercase; transition: transform 0.1s; }
+    .btn:hover { transform: scale(1.05); background: #009639; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <div class="hud">
+    <div><span class="hud-title">MARIO</span><br><span id="score-val" class="hud-val">000000</span></div>
+    <div><span class="hud-title">COINS</span><br>🪙 <span id="coin-val" class="hud-val">00</span></div>
+    <div><span class="hud-title">TIME</span><br><span id="time-val" class="hud-val">300</span></div>
+  </div>
+
+  <canvas id="gameCanvas" width="800" height="450"></canvas>
+
+  <div id="start-overlay" class="overlay">
+    <h1>Super Mario JS</h1>
+    <p>A / D or ◄ / ► to Move | W / Space / ▲ to Jump</p>
+    <button class="btn" id="btn-start">Play Game</button>
+  </div>
+
+  <div id="game-overlay" class="overlay hidden">
+    <h1 id="overlay-title">Game Over</h1>
+    <p id="overlay-msg">Better luck next time!</p>
+    <button class="btn" id="btn-restart">Try Again</button>
+  </div>
+</div>
+
+<script>
+// --- GAME ENGINE & STATE ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+let score = 0;
+let coins = 0;
+let timeLeft = 300;
+let gameState = 'START';
+let cameraX = 0;
+let timerInterval = null;
+
+// Controls
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['Space', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// --- MARIO PLAYER CLASS ---
+class Player {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.x = 80;
+    this.y = 300;
+    this.w = 26;
+    this.h = 34;
+    this.vx = 0;
+    this.vy = 0;
+    this.speed = 4.5;
+    this.jumpForce = -12;
+    this.grounded = false;
+    this.facing = 'right';
+    this.isDead = false;
+  }
+
+  update(dt, platforms, enemies) {
+    if (this.isDead) return;
+
+    // Movement Physics
+    if (keys['KeyA'] || keys['ArrowLeft']) {
+      this.vx = -this.speed;
+      this.facing = 'left';
+    } else if (keys['KeyD'] || keys['ArrowRight']) {
+      this.vx = this.speed;
+      this.facing = 'right';
+    } else {
+      this.vx *= 0.8; // Friction
+    }
+
+    // Jump Logic
+    if ((keys['KeyW'] || keys['Space'] || keys['ArrowUp']) && this.grounded) {
+      this.vy = this.jumpForce;
+      this.grounded = false;
+    }
+
+    // Gravity
+    this.vy += 0.6;
+    this.x += this.vx;
+
+    // Horizontal Platform Collisions
+    platforms.forEach(p => {
+      if (this.x < p.x + p.w && this.x + this.w > p.x && this.y < p.y + p.h && this.y + this.h > p.y) {
+        if (this.vx > 0) this.x = p.x - this.w;
+        else if (this.vx < 0) this.x = p.x + p.w;
+      }
+    });
+
+    this.y += this.vy;
+    this.grounded = false;
+
+    // Vertical Platform Collisions
+    platforms.forEach(p => {
+      if (this.x < p.x + p.w && this.x + this.w > p.x && this.y < p.y + p.h && this.y + this.h > p.y) {
+        if (this.vy > 0) { // Landing on top
+          this.y = p.y - this.h;
+          this.vy = 0;
+          this.grounded = true;
+        } else if (this.vy < 0) { // Hitting underside block
+          this.y = p.y + p.h;
+          this.vy = 0;
+          if (p.type === 'question' && !p.hit) {
+            p.hit = true;
+            coins++;
+            score += 200;
+            updateHUD();
+          }
+        }
+      }
+    });
+
+    // Pitfall Check
+    if (this.y > canvas.height + 50) this.die();
+
+    // Enemy Collisions
+    enemies.forEach(e => {
+      if (!e.alive) return;
+      if (this.x < e.x + e.w && this.x + this.w > e.x && this.y < e.y + e.h && this.y + this.h > e.y) {
+        if (this.vy > 0 && this.y + this.h - this.vy <= e.y + 12) { // Stomp Goomba
+          e.alive = false;
+          this.vy = -7;
+          score += 100;
+          updateHUD();
+        } else {
+          this.die(); // Mario dies
+        }
+      }
+    });
+  }
+
+  die() {
+    if (this.isDead) return;
+    this.isDead = true;
+    endGame(false, "Mario fell or got caught by a Goomba!");
+  }
+
+  draw(ctx, camX) {
+    ctx.save();
+    ctx.translate(this.x - camX, this.y);
+
+    // Mario Pixel Art Representation
+    ctx.fillStyle = '#e52521'; // Red Hat/Shirt
+    ctx.fillRect(4, 0, 18, 8);
+    ctx.fillRect(2, 12, 22, 10);
+
+    ctx.fillStyle = '#fcc082'; // Skin
+    ctx.fillRect(4, 8, 18, 6);
+
+    ctx.fillStyle = '#0022cc'; // Blue Overalls
+    ctx.fillRect(4, 20, 18, 10);
+
+    ctx.fillStyle = '#8b4513'; // Shoes
+    ctx.fillRect(2, 28, 8, 6);
+    ctx.fillRect(16, 28, 8, 6);
+
+    ctx.restore();
+  }
+}
+
+// --- GOOMBA ENEMY CLASS ---
+class Goomba {
+  constructor(x, y) {
+    this.x = x; this.y = y; this.w = 28; this.h = 28;
+    this.vx = -1.2; this.alive = true;
+  }
+
+  update(platforms) {
+    if (!this.alive) return;
+    this.x += this.vx;
+
+    // Reverse movement at walls
+    platforms.forEach(p => {
+      if (this.x < p.x + p.w && this.x + this.w > p.x && this.y < p.y + p.h && this.y + this.h > p.y) {
+        this.vx *= -1;
+      }
+    });
+  }
+
+  draw(ctx, camX) {
+    if (!this.alive) return;
+    ctx.save();
+    ctx.translate(this.x - camX, this.y);
+
+    ctx.fillStyle = '#8b4513'; // Mushroom Dome Body
+    ctx.beginPath();
+    ctx.arc(14, 12, 14, Math.PI, 0);
+    ctx.fill();
+    ctx.fillRect(4, 12, 20, 12);
+
+    ctx.fillStyle = '#fcc082'; // Stem / Feet Base
+    ctx.fillRect(8, 20, 12, 8);
+
+    ctx.fillStyle = '#000'; // Eyes
+    ctx.fillRect(6, 10, 3, 6);
+    ctx.fillRect(19, 10, 3, 6);
+
+    ctx.restore();
+  }
+}
+
+// --- LEVEL SETUP & GENERATOR ---
+let platforms = [];
+let coinsList = [];
+let enemies = [];
+let flagPole = null;
+
+function buildLevel() {
+  platforms = [
+    // Main Ground with Pits
+    { x: 0, y: 380, w: 900, h: 70, type: 'ground' },
+    { x: 1000, y: 380, w: 800, h: 70, type: 'ground' },
+    { x: 1900, y: 380, w: 1000, h: 70, type: 'ground' },
+
+    // Pipes
+    { x: 300, y: 310, w: 48, h: 70, type: 'pipe' },
+    { x: 550, y: 270, w: 48, h: 110, type: 'pipe' },
+    { x: 1200, y: 310, w: 48, h: 70, type: 'pipe' },
+
+    // Blocks & Question Blocks
+    { x: 200, y: 260, w: 32, h: 32, type: 'question', hit: false },
+    { x: 380, y: 260, w: 32, h: 32, type: 'brick' },
+    { x: 412, y: 260, w: 32, h: 32, type: 'question', hit: false },
+    { x: 444, y: 260, w: 32, h: 32, type: 'brick' },
+    { x: 412, y: 150, w: 32, h: 32, type: 'question', hit: false },
+
+    // Stairs
+    { x: 1400, y: 348, w: 32, h: 32, type: 'brick' },
+    { x: 1432, y: 316, w: 32, h: 64, type: 'brick' },
+    { x: 1464, y: 284, w: 32, h: 96, type: 'brick' },
+    { x: 1496, y: 252, w: 32, h: 128, type: 'brick' },
+  ];
+
+  coinsList = [
+    { x: 206, y: 220, collected: false },
+    { x: 600, y: 340, collected: false },
+    { x: 640, y: 340, collected: false },
+    { x: 680, y: 340, collected: false },
+    { x: 1440, y: 260, collected: false },
+  ];
+
+  enemies = [
+    new Goomba(480, 352),
+    new Goomba(750, 352),
+    new Goomba(1100, 352),
+    new Goomba(1300, 352),
+    new Goomba(1600, 352),
+  ];
+
+  flagPole = { x: 2600, y: 100, w: 10, h: 280 };
+}
+
+const player = new Player();
+
+// --- GAME LOGIC ---
+function updateHUD() {
+  document.getElementById('score-val').innerText = String(score).padStart(6, '0');
+  document.getElementById('coin-val').innerText = String(coins).padStart(2, '0');
+  document.getElementById('time-val').innerText = String(timeLeft).padStart(3, '0');
+}
+
+function startGame() {
+  score = 0; coins = 0; timeLeft = 300;
+  player.reset();
+  buildLevel();
+  updateHUD();
+
+  gameState = 'PLAYING';
+  document.getElementById('start-overlay').classList.add('hidden');
+  document.getElementById('game-overlay').classList.add('hidden');
+
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    if (gameState === 'PLAYING') {
+      timeLeft--;
+      updateHUD();
+      if (timeLeft <= 0) player.die();
+    }
+  }, 1000);
+}
+
+function endGame(win, message) {
+  gameState = win ? 'WIN' : 'LOSE';
+  clearInterval(timerInterval);
+
+  const overlay = document.getElementById('game-overlay');
+  document.getElementById('overlay-title').innerText = win ? "Course Cleared!" : "Game Over";
+  document.getElementById('overlay-msg').innerText = message;
+  overlay.classList.remove('hidden');
+}
+
+// --- MAIN LOOP & RENDER ---
+function gameLoop() {
+  if (gameState === 'PLAYING') {
+    // 1. Logic Update
+    player.update(1/60, platforms, enemies);
+    enemies.forEach(e => e.update(platforms));
+
+    // Camera follow player
+    cameraX = Math.max(0, player.x - canvas.width / 3);
+
+    // Coin Pickups
+    coinsList.forEach(c => {
+      if (!c.collected && Math.hypot(player.x + 13 - c.x, player.y + 17 - c.y) < 20) {
+        c.collected = true;
+        coins++;
+        score += 200;
+        updateHUD();
+      }
+    });
+
+    // Flagpole Victory Check
+    if (player.x + player.w >= flagPole.x) {
+      score += timeLeft * 50;
+      endGame(true, `You reached the castle! Final Score: ${score}`);
+    }
+  }
+
+  // 2. Render Scene
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Background Hills & Clouds
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.beginPath(); ctx.arc(200 - cameraX * 0.2, 80, 25, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(600 - cameraX * 0.2, 100, 35, 0, Math.PI * 2); ctx.fill();
+
+  // Platforms
+  platforms.forEach(p => {
+    ctx.save();
+    ctx.translate(p.x - cameraX, p.y);
+    if (p.type === 'ground') {
+      ctx.fillStyle = '#c84c0c'; ctx.fillRect(0, 0, p.w, p.h);
+      ctx.fillStyle = '#fcb492'; ctx.fillRect(0, 0, p.w, 8);
+    } else if (p.type === 'pipe') {
+      ctx.fillStyle = '#00a800'; ctx.fillRect(0, 0, p.w, p.h);
+      ctx.fillStyle = '#004800'; ctx.strokeRect(0, 0, p.w, p.h);
+    } else if (p.type === 'brick') {
+      ctx.fillStyle = '#b84418'; ctx.fillRect(0, 0, p.w, p.h);
+      ctx.strokeStyle = '#000'; ctx.strokeRect(0, 0, p.w, p.h);
+    } else if (p.type === 'question') {
+      ctx.fillStyle = p.hit ? '#8b5a2b' : '#fcb42c';
+      ctx.fillRect(0, 0, p.w, p.h);
+      ctx.strokeStyle = '#000'; ctx.strokeRect(0, 0, p.w, p.h);
+      if (!p.hit) {
+        ctx.fillStyle = '#000'; ctx.font = 'bold 18px monospace';
+        ctx.fillText('?', 10, 22);
+      }
+    }
+    ctx.restore();
+  });
+
+  // Coins
+  coinsList.forEach(c => {
+    if (!c.collected) {
+      ctx.fillStyle = '#fbd000';
+      ctx.beginPath();
+      ctx.arc(c.x - cameraX, c.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Flagpole & Castle
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(flagPole.x - cameraX, flagPole.y, flagPole.w, flagPole.h);
+  ctx.fillStyle = '#43b047';
+  ctx.beginPath(); ctx.arc(flagPole.x - cameraX + 5, flagPole.y, 10, 0, Math.PI * 2); ctx.fill();
+
+  // Enemies & Player
+  enemies.forEach(e => e.draw(ctx, cameraX));
+  player.draw(ctx, cameraX);
+
+  requestAnimationFrame(gameLoop);
+}
+
+// UI Event Listeners
+document.getElementById('btn-start').addEventListener('click', startGame);
+document.getElementById('btn-restart').addEventListener('click', startGame);
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
